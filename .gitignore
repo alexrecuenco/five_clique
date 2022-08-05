@@ -1,1 +1,2 @@
-words_alpha.txt
+words_alpha*.txt
+env/
