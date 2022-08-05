@@ -1,6 +1,6 @@
 # Five Clique
 
-Copyright (C) 2022 - Benjamin Paassen, Scott Mansell
+Copyright (C) 2022 - Alejandro Gonzalez Recuenco, Benjamin Paassen, Scott Mansell  
 
 A solution to the problem of finding five English words with 25 distinct characters, using graph theory.
 

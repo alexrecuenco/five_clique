@@ -1,154 +1,167 @@
-"""
-# Copyright (C) 2022 - Benjamin Paassen
-
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-# GNU General Public License for more details.
-
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <http://www.gnu.org/licenses/>.
-"""
-
+""" LICENSE: See LICENSE"""
+from string import ascii_lowercase
 from tqdm import tqdm
 import csv
+from typing import Dict, Iterable, List, Set
+from collections import defaultdict
+from itertools import product
 
-# prepare a data structure for all five-letter words in string and set representation
-anagrams = {}
-graph = {}
 
 # This is a compact representation of a "char set" that fits in just 26 bits
 # each bit represents a letter in the alphabet
 # we can quickly check for an intersection between two words with the bitwise AND operator
 # or union them with bitwise OR
-def alphaBit(word):
-	ret = 0
-	for char in word:
-		alphaIndex = (ord(char) | 0x20) - ord('a')
-		ret |= 1 << alphaIndex
-	return ret
+def letter_set(word: str):
+    ret = 0
+    for char in word:
+        alphaIndex = ord(char) - ord("a")
+        ret |= 1 << alphaIndex
+    return ret
 
-def bitCount(num):
-	#return num.bit_count() # faster, but requires python 3.10+
-	count = 0
-	while num:
-		num &= num - 1
-		count += 1
-	return count
 
-print('--- reading words file ---')
+def bit_count(num: int):
+    count = 0
+    while num:
+        num &= num - 1
+        count += 1
+    return count
 
-# words_alpha.txt from https://github.com/dwyl/english-words
-with open('words_alpha.txt') as f:
-	for word in tqdm(f):
-		word = word[:-1]
-		if len(word) != 5:
-			continue
-		# compute set representation of the word
-		char_set = alphaBit(word)
-		if bitCount(char_set) != 5:
-			continue
 
-		if char_set in anagrams:
-			anagrams[char_set].append(word)
-			continue
+def read_words(fname: str = "words_alpha.txt") -> Dict[int, List[str]]:
+    anagrams = defaultdict(list)
+    # words_alpha.txt from https://github.com/dwyl/english-words
+    with open(fname) as f:
+        word: str
+        for word in f:
+            word = word.strip()
+            if len(word) != 5:
+                continue
+            # compute set representation of the word
+            char_set = letter_set(word)
+            if bit_count(char_set) != 5:
+                continue
 
-		anagrams[char_set] = [word]
-		graph[char_set]	= set()
+            anagrams[char_set].append(word)
+    return dict(anagrams)
 
-print('--- building neighborhoods ---')
 
-# compute the 'neighbors' for each word, i.e. other words which have entirely
-# distinct letters
-words = sorted(list(anagrams.keys()))
-for i, char_set in tqdm(enumerate(words), total=len(words)):
-	neighbors = graph[char_set]
+# prepare a data structure for all five-letter words in string and set representation
 
-	# We only need one-direction of each relationship
-	for j, other_set in enumerate(words[i+1:], i+1):
-		if char_set & other_set == 0:
-			neighbors.add(j)
 
-print('--- finding cliques ---')
+def neighbor_graph(anagrams: Dict[int, List[str]]) -> Dict[int, Set[int]]:
+    # compute the 'neighbors' for each word, i.e. other words which have entirely
+    # distinct letters
+    graph = defaultdict(set)
+    anagram_sets = sorted(anagrams.keys())
+    for i, char_set in enumerate(tqdm(anagram_sets)):
+        neighbors = graph[char_set]
+        for other_set in anagram_sets[i + 1 :]:
+            if not (char_set & other_set):
+                neighbors.add(other_set)
+    return dict(graph)
+
+
+ALL_LETTERS = letter_set(ascii_lowercase)
+# Each word is obtained from the previous one plus the new neighbor, we untangle them substracting
+def untangle_words(*words: List[int]):
+    remain = ALL_LETTERS
+    for word in reversed(words):
+        word = word & remain
+        yield word
+        remain = remain - word
+
+
+TOTAL_LENGTH = 5
+TOTAL_LENGTH_MINUS_ONE = 4
 
 # We maintain a set of tree branches that we have already visited and know
 # don't contain any clique subsets
-#
-# For performance reasons, it's only worth pruning layers 2 and 3
-# layer 1 is already cached with the neighbor calculation above, and if you
-# get to layer 4, it's quicker to just complete the search
-prune = set()
+__prune: Set[int] = set()
+__add_to_checked = __prune.add
+__checked_already = __prune.__contains__
 
-# start clique finding
-graphs = [(graph[char_set], char_set) for char_set in words]
-Cliques = []
-for i in tqdm(range(len(words))):
-	Ni, i_set = graphs[i]
-	for j in Ni:
-		Nj, j_set = graphs[j]
-		if (i_set | j_set) in prune:
-			continue
-		# the remaining candidates are only the words in the intersection
-		# of the neighborhood sets of i and j
-		Nij = Ni & Nj
-		if len(Nij) < 3:
-			prune.add(i_set | j_set)
-			continue
 
-		have_ij = False
-		for k in Nij:
-			Nk, k_set = graphs[k]
-			if (i_set | j_set | k_set) in prune:
-				continue
-			# intersect with neighbors of k
-			Nijk = Nij & Nk
-			if len(Nijk) < 2:
-				prune.add(i_set | j_set | k_set)
-				continue
+def merge(
+    last_word: int,
+    *words: List[int],
+    neighbors: Set[int],
+    graph: Dict[int, Set[int]],
+    cliques: List[Iterable[int]],
+    # We bind them to the local environment for cpython tiiiny speed up
+    add_to_checked=__add_to_checked,
+    checked_already=__checked_already,
+) -> bool:
+    num_words = len(words) + 1
+    if len(neighbors) + num_words < TOTAL_LENGTH:
+        return False
+    if num_words == TOTAL_LENGTH_MINUS_ONE:
+        for neighbor_word in neighbors:
+            all_letters = neighbor_word | last_word
+            cliques.append(tuple(untangle_words(all_letters, last_word, *words)))
+        return True
 
-			have_ijk = False
-			for l in Nijk:
-				# intersect with neighbors of l
-				Nijkl = Nijk & graphs[l][0]
-				# all remaining neighbors form a 5-clique with i, j, k, and l
+    result = False
+    for neighbor_word in neighbors:
+        if last_word & neighbor_word:
+            continue
 
-				for r in Nijkl:
-					Cliques.append([i, j, k, l, r])
-					have_ij = True
-					have_ijk = True
+        shared_letters = last_word | neighbor_word
 
-			if not have_ijk:
-				# we didn't find anything on this branch, prune it
-				prune.add(i_set | j_set | k_set)
-		if not have_ij:
-			# we didn't find anything on this branch, prune it
-			prune.add(i_set | j_set)
+        if checked_already(shared_letters):
+            continue
 
-print('completed! Found %d cliques' % len(Cliques))
-print(f'{len(prune)} branches of the tree were pruned')
+        if merge(
+            shared_letters,
+            last_word,
+            *words,
+            neighbors=neighbors & graph[neighbor_word],
+            cliques=cliques,
+            graph=graph,
+        ):
+            result = True
+        else:
+            add_to_checked(shared_letters)
 
-def RecursiveExpand(lst):
-	head, *tail = lst
-	if not tail:
-		return [[w] for w in anagrams[words[head]]]
-	tail = RecursiveExpand(tail)
+    return result
 
-	return [[w, *t] for w in anagrams[words[head]] for t in tail]
 
-ExpandedCliques = []
-for cliq in Cliques:
-	ExpandedCliques += [sorted(c) for c in RecursiveExpand(cliq)]
+def expand(word_list: List[int], anagrams: Dict[int, List[str]]) -> Iterable[List[str]]:
+    all_anagrams = [anagrams[word] for word in word_list]
+    return product(*all_anagrams)
 
-print(f'expanded to {len(ExpandedCliques)} cliques with anagrams')
 
-print('--- write to output ---')
-with open('cliques.csv', 'w', newline='', encoding='utf-8') as f:
-	writer = csv.writer(f, delimiter = '\t')
+def main():
+    print("--- reading words file ---")
+    anagrams = read_words("words_alpha.txt")
+    print("--- building neighborhoods ---")
+    graph = neighbor_graph(anagrams)
 
-	for cliq_words in sorted(ExpandedCliques):
-		writer.writerow(cliq_words)
+    anagram_sets = sorted(anagrams.keys())
+    cliques: List[Iterable[int]] = []
+    print("--- finding cliques ---")
+
+    for word in tqdm(anagram_sets):
+        merge(word, neighbors=graph[word], graph=graph, cliques=cliques)
+
+    print("completed! Found %d cliques" % len(cliques))
+    print(f"pruned {len(__prune)}")
+
+    print("--- write to output ---")
+
+    answers = sorted(
+        tuple(sorted(expanded_words))
+        for cliq in cliques
+        for expanded_words in expand(cliq, anagrams)
+    )
+
+    print(f"answers {len(answers)}")
+
+    with open("cliques.csv", "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f, delimiter="\t")
+
+        for answer in answers:
+            writer.writerow(answer)
+
+
+if __name__ == "__main__":
+    main()
